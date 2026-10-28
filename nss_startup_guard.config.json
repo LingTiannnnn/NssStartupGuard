@@ -1,0 +1,17 @@
+{
+  "service_name": "UniwillService",
+  "nss_process_name": "NucSoftwareStudio.exe",
+  "package_app_user_model_id": "AppUp.IntelNUCSoftwareStudio_8j3eq9eme6ctt!App",
+  "nss_arguments": "tray",
+  "startup_timeout_sec": 120,
+  "recovery_timeout_sec": 100,
+  "poll_interval_sec": 2,
+  "prelaunch_stable_sec": 8,
+  "observation_sec": 20,
+  "nss_start_grace_sec": 15,
+  "retry_backoff_sec": 5,
+  "max_launch_attempts": 2,
+  "launcher_output_limit": 16000,
+  "log_max_bytes": 1000000,
+  "log_backup_count": 3
+}

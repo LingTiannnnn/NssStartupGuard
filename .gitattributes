@@ -1,0 +1,9 @@
+# 批处理脚本必须保持 CRLF：直接按原样存入对象库，检出时也不转换，
+# 这样 clone 和 raw 下载拿到的都是可执行版本。
+*.bat -text
+*.cmd -text
+
+*.cs text eol=lf
+*.json text eol=lf
+*.config text eol=lf
+*.md text eol=lf

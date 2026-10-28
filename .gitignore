@@ -1,0 +1,6 @@
+# 编译产物与运行时目录：预编译 EXE 通过 Release 分发，不进版本库
+*.exe
+logs/
+*.log
+bin/
+obj/
