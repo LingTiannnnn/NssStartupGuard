@@ -1,86 +1,49 @@
 # NssStartupGuard
 
-用于解决 NUC x15 控制台（NucSoftware Studio / NSS）开机自启失败，以及手工第一次启动后报 WebSocket 通信失败的问题。
+NUC x15 控制台（NucSoftware Studio，下面简称 NSS）开机自启失败，或者手工第一次启动后报 WebSocket 通信失败，就用这个程序接管登录时的启动时机。不改 Intel / Uniwill 的任何原始文件、服务和配置。
 
-不替换、不修改 Intel / Uniwill 的任何原始文件、服务或配置，只在当前用户登录时接管 NSS 的启动时机。
+预编译包在 [Releases](../../releases) 里的 `NssStartupGuard.zip`。
 
-## 下载与使用
+## 食用方法
 
-预编译包在 [Releases](../../releases) 里，下载 `NssStartupGuard.zip`。
+1. 解压全部内容到一个固定位置。配置和 `logs/` 都按 EXE 所在目录查找，别留在下载目录或临时目录。
+2. 双击 `Register-Startup.bat`，在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 注册当前用户启动项。
+3. 到任务管理器的「启动应用」里禁用 NucSoftware Studio 自身的开机自启项。NSS 只能有一个启动入口，否则守护程序和原启动任务会互相抢。
+4. 重新登录或重启，enjoy。
 
-1. 解压全部内容到合适位置。程序按 EXE 所在目录定位配置和 `logs/`，请放在固定目录，不要留在临时目录或下载目录。
-2. 双击 `Register-Startup.bat`，它在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 注册当前用户启动项。
-3. 手工去任务管理器「启动应用」，或你惯用的启动项管理工具，禁用 NucSoftware Studio 自身的开机自启项。NSS 只能有一个启动入口，否则守护程序和原启动任务会互相抢。
-4. 注销重新登录，或者重启。enjoy。
+要撤销就双击 `Unregister-Startup.bat`，然后把 NSS 自身的开机自启项恢复回去。
 
-撤销注册：双击 `Unregister-Startup.bat`，同时可以把 NSS 自身的开机自启项恢复回来。
+## 两个故障
 
-## 问题现象
+开机进桌面托盘里没有 NSS，和第一次打开报通信错误，是两条独立的链。
 
-- 开机进桌面后托盘里没有 NSS，启动任务看起来已经跑过，但主程序没起来。
-- 第一次手工打开 NSS 报通信错误；关掉再开第二次就正常。
+包内启动器 `NssOnStartupLauncher.exe` 的开机分支只是起了一个隐藏的 cmd.exe，把 `NucSoftwareStudio.exe tray` 写进标准输入就返回，不等 NSS，不看退出码，自己也没留日志。命令行里用的是裸文件名，要靠 PATH 和应用执行别名解析，而实测执行别名和包内路径两处都返回「拒绝访问」，NSS 根本没被拉起来。这条链上 Uniwill Service 反而是正常的，NSS 主日志也不会有新的 `Launched NSS`。
 
-这两件事的成因不同，分开看。
+另一条是服务自己崩。NSS 建好 duplex WebSocket 会话后，服务的 `UWSystemMonitor` 定时器通过 `SysMonitorNotification` 回调往一个无效或正在关闭的 WebSocket 里发数据，`WebSocketException` 转成 `CommunicationException` 没人接，`UniwillService.exe` 跟着退出。Windows 按失败恢复设置等 60 秒后重启服务，所以第一次连上的 NSS 报错，服务重启后再开就正常。服务地址是 `ws://localhost:58594/UniwillService`。崩溃记在事件查看器的 `.NET Runtime` 和 `Application Error`，服务重启记在 `Service Control Manager` 事件 7031，NSS 自己的日志在 `%LOCALAPPDATA%\Packages\AppUp.IntelNUCSoftwareStudio_8j3eq9eme6ctt\LocalCache\Local\NucSoftwareStudio\NssLog.txt`。
 
-## 原因
+## 守护程序做的事
 
-### 一、开机启动链交接失败
+登录之后按一个有界状态机走：
 
-包内启动器 `NssOnStartupLauncher.exe` 的无参数分支（也就是开机那条路径）做的事是：
+1. 互斥体保证只有一个守护实例，NSS 已经在跑就直接成功退出。
+2. 等 `UniwillService` 进入 Running，并要求服务 PID 在 `prelaunch_stable_sec` 内保持不变；服务退出或 PID 变了就重新等。
+3. 用 `IApplicationActivationManager` 按包 AUMID 加 `tray` 参数激活 NSS，不碰执行别名，也不直接跑 WindowsApps 里的文件。
+4. 激活返回成功不算数，得真看到 NSS 主进程。启动后 NSS 和服务 PID 一起观察。
+5. 服务崩了就等 Windows 恢复，不主动重启服务；这期间 NSS 还活着就不重复启动它。
+6. 进程查不到就按未知处理，不再往下决策。状态未知，或者启动器还在跑、可能有迟到激活时，禁止重试。重试有上限，没有无限循环。
 
-```text
-启动隐藏的 cmd.exe
-→ 通过标准输入写入 NucSoftwareStudio.exe tray
-→ 刷新并关闭标准输入
-→ 启动器立即返回
-```
-
-它不等 NSS、不看退出码、也没有交接日志。命令行里用的是裸文件名，依赖 PATH 和应用执行别名解析，而实测执行别名与包内路径都会返回「拒绝访问」，NSS 因此根本没被拉起来。NSS 主日志里不会出现新的 `Launched NSS`，Uniwill Service 此时反而是正常的。
-
-### 二、Uniwill Service 崩溃导致的 WebSocket 报错
-
-NSS 建立 duplex WebSocket 会话后，服务的监控定时器在发送回调时访问了无效或正在关闭的 WebSocket，未处理异常直接把服务进程带崩：
-
-```text
-UWSystemMonitor 定时器
-→ IUniwillServiceCallback.SysMonitorNotification
-→ WebSocketBase.SendAsyncCore
-→ WebSocket.ThrowOnInvalidState
-→ System.Net.WebSockets.WebSocketException
-→ System.ServiceModel.CommunicationException
-→ UniwillService.exe 退出
-```
-
-服务失败恢复动作是在 60 秒后重启，所以第一次连上的 NSS 报错，等服务重启后再启动就正常——这正是「第一次报错、第二次能用」的来源。服务地址是 `ws://localhost:58594/UniwillService`。
-
-对应的证据在事件查看器：`.NET Runtime` 和 `Application Error` 记录服务崩溃，`Service Control Manager` 事件 7031 记录异常退出与重启；NSS 自己的文件日志在
-`%LOCALAPPDATA%\Packages\AppUp.IntelNUCSoftwareStudio_8j3eq9eme6ctt\LocalCache\Local\NucSoftwareStudio\NssLog.txt`。
-
-## 守护程序做了什么
-
-接管登录启动后，以当前用户权限跑一个有界状态机：
-
-1. 每用户互斥体保证只有一个守护实例；NSS 已经在运行就直接成功退出，不重复启动。
-2. 有界等待 `UniwillService` 进入 Running 并记录服务 PID，要求该 PID 在 `prelaunch_stable_sec` 窗口内保持不变；服务退出或 PID 变化则重新等待。
-3. 通过 Windows `IApplicationActivationManager.ActivateApplication`，用包 AUMID 加 `tray` 参数激活 NSS，保留包身份。不直接执行 WindowsApps 包内文件，也不依赖执行别名。
-4. COM 激活返回成功不代表 NSS 已经稳定，必须实际观察到 NSS 主进程。启动后联合观察 NSS 与服务 PID。
-5. 服务崩了就等 Windows 自己恢复，不主动重启服务；这期间 NSS 仍然存活就不重复启动它。
-6. 进程查询失败一律按「未知」处理，不按「未运行」处理。状态未知、或启动器还在跑可能有迟到激活时，禁止重试。
-7. 只有明确未运行且还有尝试额度才重试；达到上限退出并记录原因，没有无限循环。
-
-## 文件说明
+## 文件
 
 | 文件 | 说明 |
 | --- | --- |
-| `NssStartupGuard.exe` | .NET Framework 4.6.1 守护程序，Windows GUI 子系统，无第三方依赖 |
+| `NssStartupGuard.exe` | .NET Framework 4.6.1，Windows GUI 子系统，无第三方依赖 |
+| `NssStartupGuard.cs` | 状态机、Windows 适配器、日志和内置测试的源码 |
 | `NssStartupGuard.exe.config` | 运行时版本声明 |
-| `nss_startup_guard.config.json` | 服务名、包 AUMID、各类等待窗口与重试参数 |
-| `Register-Startup.bat` | 注册当前用户启动项 |
-| `Unregister-Startup.bat` | 删除该启动项，未注册时直接返回成功 |
-| `NssStartupGuard.cs` | 状态机、Windows 适配器、日志与内置隔离测试的完整源码 |
-| `logs/` | 运行时生成，日志文件为 `nss_startup_guard.log` |
+| `nss_startup_guard.config.json` | 服务名、包 AUMID、等待窗口和重试参数 |
+| `Register-Startup.bat` 和 `Unregister-Startup.bat` | 注册、删除当前用户启动项 |
+| `logs/nss_startup_guard.log` | 运行时生成，按大小滚动 |
 
-正常运行和成功退出都不弹控制台。守护模式下非零退出时会打开终端，显示退出码、错误详情和日志末尾，方便开机失败后回头查。
+正常运行和成功退出都不弹控制台。守护模式下非零退出会打开终端，显示退出码、错误详情和日志末尾。
 
 ## 命令
 
@@ -88,65 +51,20 @@ UWSystemMonitor 定时器
 NssStartupGuard.exe [--config path] [--check-config] [--self-test] [--activate-only]
 ```
 
-| 参数 | 说明 |
-| --- | --- |
-| 无参数 | 完整守护流程，开机启动项用的就是它 |
-| `--config path` | 指定配置文件路径 |
-| `--check-config` | 只校验 JSON 配置，不查询也不启动任何组件 |
-| `--self-test` | 用模拟适配器和虚拟时钟跑 19 项隔离测试，不接触真实 NUC 组件 |
-| `--activate-only` | 只执行一次真实包激活，用来单独验证 AUMID 和参数是否正确 |
+不带参数就是完整守护流程，启动项注册的是它。`--config path` 指定配置文件位置。`--check-config` 只校验 JSON，不查询也不启动组件。`--self-test` 用模拟适配器和虚拟时钟跑 19 项隔离测试。`--activate-only` 只做一次真实包激活，用来单独验证 AUMID 和参数对不对。
 
 退出码：`0` 成功，或 NSS 已在运行；`1` 已有守护实例；`2` 配置或参数错误；`3` 等待服务超时；`4` 状态不稳定或未知，停止决策；`5` 达到启动重试上限；`6` 包激活失败。
 
-## 配置项
+## 配置
 
-| 键 | 含义 |
-| --- | --- |
-| `service_name` | 要等待的服务，本机为 `UniwillService` |
-| `nss_process_name` | NSS 主进程名，用于判断是否已在运行 |
-| `package_app_user_model_id` | NSS 包的 AUMID，激活时不带版本化安装目录 |
-| `nss_arguments` | 激活参数，`tray` 表示按托盘模式启动 |
-| `startup_timeout_sec` | 首次等待服务稳定的上限 |
-| `recovery_timeout_sec` | 服务崩溃后等待 Windows 自动恢复的上限 |
-| `poll_interval_sec` | 轮询间隔 |
-| `prelaunch_stable_sec` | 启动 NSS 前要求服务 PID 保持不变的时长 |
-| `observation_sec` | 启动后的联合观察窗口 |
-| `nss_start_grace_sec` | 允许 NSS 迟到的宽限，必须小于 `observation_sec` |
-| `retry_backoff_sec` | 两次启动尝试之间的间隔 |
-| `max_launch_attempts` | 启动尝试上限，取值 1 到 5 |
-| `launcher_output_limit` | 单次输出捕获的字节上限，超出部分标记截断 |
-| `log_max_bytes` / `log_backup_count` | 日志滚动大小与保留份数 |
-
-未知键名会导致配置加载失败，不会静默忽略。
-
-## 换机器
-
-默认配置对应 Intel NUC x15。其他机型需要改三个值：服务名、NSS 进程名、包 AUMID。
-
-```powershell
-Get-Service | Where-Object Name -like "*niwill*"
-Get-StartApps | Where-Object Name -like "*NUC*"
-```
-
-`Get-StartApps` 输出的 AppID 就是 `package_app_user_model_id`。改完先跑 `--check-config`，再用 `--activate-only` 确认能激活出 NSS 主进程，最后才注册启动项。
-
-## 自己编译
-
-只需要 .NET Framework 自带的 C# 编译器，`JavaScriptSerializer` 依赖 `System.Web.Extensions.dll`。
-
-```bat
-C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -target:winexe -out:NssStartupGuard.exe -reference:System.Web.Extensions.dll NssStartupGuard.cs
-```
-
-编译产物记得和 `NssStartupGuard.exe.config`、`nss_startup_guard.config.json` 放在同一目录。
+跟机器有关的是 `service_name`、`nss_process_name`、`package_app_user_model_id`、`nss_arguments` 四项。其余是时间窗口和重试参数：`startup_timeout_sec`、`recovery_timeout_sec`、`poll_interval_sec`、`prelaunch_stable_sec`、`observation_sec`、`nss_start_grace_sec`（要小于 `observation_sec`）、`retry_backoff_sec`、`max_launch_attempts`（1 到 5），日志与输出捕获是 `log_max_bytes`、`log_backup_count`、`launcher_output_limit`。配置里出现未知键会直接报错，不静默忽略。
 
 ## 边界
 
-- 这只解决开机 / 登录竞态这条链。手动启动、其他用户会话、或其他客户端连接触发的服务崩溃，它管不到。
-- 崩溃本身的根因修复方向是给 `UniwillService.exe` 打方法级 IL 补丁，处理 `WebSocketException` 与 `CommunicationException` 并让后续监控周期继续。那条路要求保留原始文件哈希与可回滚副本，厂商更新后还得重新审核，本仓库不含该补丁。
-- NSS 另有过 WPF `XamlParseException` / `InvalidOperationException` 界面崩溃记录，那是另一个故障，不能拿 WebSocket 服务崩溃的修复结果来验收。
-- 程序不停止服务、不结束 NSS、不修改任何原始二进制。回滚只需删掉启动项并恢复 NSS 自身的开机自启。
+只管开机和登录这一条竞态链。手动启动、其他用户会话、其他客户端连接触发的服务崩溃不在范围内，那些要给 `UniwillService.exe` 打方法级 IL 补丁，本仓库没有。NSS 的 WPF `XamlParseException` / `InvalidOperationException` 界面崩溃是另一个故障，两者不能互为验收依据。
 
-## 已知限制
+程序不停服务、不结束 NSS、不改原始二进制。回滚就是删掉启动项，把 NSS 自身的开机自启恢复回来。
 
-连续冷启动、启动项安装与无人值守开机验证尚未在真实机器上完整跑过；`--self-test` 覆盖的是模拟场景。实际遇到启动失败时，先看 `logs/nss_startup_guard.log`，里面记录了每一次状态转换和退出原因。
+## 测试
+
+基本功能全部在本人真机上通过实机测试。
